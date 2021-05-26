@@ -179,3 +179,218 @@ app.listen(PORT, (req, res) => {
 });
 ```
 Обратите внимание что мы добавили миддлвар bodyParser и теперь мы можем работать с http body.
+
+## Создаем роут для регистрации
+
+Один роут будет подан вместе с кодом, остальные на уровне алгоритма, который надо будет реализовать самому. 
+Для регистрации алгоритм таков:
+1. получить email и password от клиента;
+2. провалидировать их, проверить что пользователя с таким емейлом не существует;
+3. создать новую запись в базе пользователей;
+4. зашифровать пароль с помощью [“соли”](https://ru.wikipedia.org/wiki/%D0%A1%D0%BE%D0%BB%D1%8C_(%D0%BA%D1%80%D0%B8%D0%BF%D1%82%D0%BE%D0%B3%D1%80%D0%B0%D1%84%D0%B8%D1%8F)).
+
+Теперь имплементируе данный алгоритм в коде:
+
+```
+// Filename : routes/user.js
+
+const express = require("express");
+const { check, validationResult} = require("express-validator/check");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const router = express.Router();
+
+const User = require("../models/user");
+
+/**
+ * @method - POST
+ * @param - /signup
+ * @description - User SignUp
+ */
+
+router.post(
+    "/signup",
+    [
+       //используем express validator чтобы проверить валидность данных
+       //проверяем что в поле email прилетел валидный емейл, и что пароль 
+       //содержит больше 6 симоволов.
+       // подробнее можно почитать в описании библиотеки 
+       // https://express-validator.github.io/docs/
+        check("username", "Please Enter a Valid Username")
+        .not()
+        .isEmpty(),
+        check("email", "Please enter a valid email").isEmail(),
+        check("password", "Please enter a valid password").isLength({
+            min: 6
+        })
+    ],
+    async (req, res) => {
+        const errors = validationResult(req);
+        //если есть ошибки валидации, отправляем их клиенту
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                errors: errors.array()
+            });
+        }
+        const {
+            username,
+            email,
+            password
+        } = req.body;
+        try {
+            //проверяем что такого пользователя не существует
+            let user = await User.findOne({
+                email
+            });
+            //если пользователь с данным емейлом уже зарегистрирован, кидаем ошибку
+            if (user) {
+                return res.status(400).json({
+                    msg: "User Already Exists"
+                });
+            }
+
+            user = new User({
+                username,
+                email,
+                password
+            });
+
+            //солим пароль  
+            const salt = await bcrypt.genSalt(10);
+            user.password = await bcrypt.hash(password, salt);
+
+            // сохраняем пользователя
+            await user.save();
+
+            const payload = {
+                user: {
+                    id: user.id
+                }
+            };
+
+            //создаем токен и отправлем на клиент
+            jwt.sign(
+                payload,
+                "randomString", {
+                    expiresIn: 10000
+                },
+                (err, token) => {
+                    if (err) throw err;
+                    res.status(200).json({
+                        token
+                    });
+                }
+            );
+        } catch (err) {
+            console.log(err.message);
+            res.status(500).send("Error in Saving");
+        }
+    }
+);
+module.exports = router;
+```
+
+В токене зашифровываем id пользователя, для последующего извлечения при авторизации. 
+После того как роут добавлен, не забываем подключить его в index.js файле:
+
+```
+const express = require("express");
+const bodyParser = require("body-parser");
+const user = require("./routes/user"); //new addition
+const InitiateMongoServer = require("./db");
+
+// Initiate Mongo Server
+InitiateMongoServer();
+
+const app = express();
+
+// PORT
+const PORT = process.env.PORT || 3000;
+
+// Middleware
+app.use(bodyParser.json());
+
+app.get("/", (req, res) => {
+  res.json({ message: "API Working" });
+});
+
+/**
+ * Router Middleware
+ * Router - /user/*
+ * Method - *
+ */
+
+//Здесь подключили наш роут 
+app.use("/user", user);
+
+app.listen(PORT, (req, res) => {
+  console.log(`Server Started at PORT ${PORT}`);
+});
+```
+Теперь можно протестировать работоспособность роута с помощью утилиты postman https://www.postman.com/. Все так же на localhost отправляем запрос содержащий username, email, password и убеждаемся что в ответ пришел токен. Настройки запроса следующие:
+method - `POST`, url - `http://localhost:3000/user/signup`, body - `raw`, type `JSON`.
+
+![Скрин с настройками запроса](postman.jpeg)
+
+Также можем протестировать валидацию, заведомо отправляя некорректные данные чтобы убедиться что приходят ошибки. Проверить, что запись была действительно создана можем в облаке mongoDB, если зайдем нашу коллекцию пользователей.
+
+##Создаем роут для логина
+Здесь будет подан только алгоритм, код надо написать самим в файле routes/user
+
+1. получить от клиента логин и пароль;
+2. провалидировать ввод;
+3. найти пользователя с данным емейлом (пример есть в роуте signup);
+4. сравнить хеш пароля пользователя и пароля который прислал клиент 
+(небольшая подсказка `const isMatch = await bcrypt.compare(password, user.password);`)
+5. если хеши совпали, то формируем токен так же как при регистрации и отправляем на клиент.
+
+Подключаем роут аналогично как мы это делали с роутом для регистрации, и так же тестируем через postman. 
+
+Если есть вопросы по тестированию эндпоинтов, можно спросить в чат. 
+
+## Создаем роут для получения профайла
+
+Ранее в токене мы зашифровывали id пользователя. Ожидается, что клиент будет передавать этот токен в каждом запросе. Теперь наша цель - прикрутить проверку токена в приватных роутах (получение профайла это приватный роут). Так мы сможем идентифицировать пользователя, когда расшифруем токен и получим id. 
+
+Cделаем миддлвар который будет выполнять эту задачу. По сути, обработчики, которые навешаны на роуты тоже являются миддлварами. Наш миддлвар будет выполняться перед ними, извлекать id пользователя и прокидывать его дальше. Таким образом, все последующие обработчики будет иметь доступ к этому id. 
+
+```
+//middleware/auth
+const jwt = require("jsonwebtoken");
+
+module.exports = function(req, res, next) {
+  const token = req.header("token");
+  if (!token) return res.status(401).json({ message: "Auth Error" });
+
+  try {
+    const decoded = jwt.verify(token, "randomString");
+    req.user = decoded.user;
+    next();
+  } catch (e) {
+    console.error(e);
+    res.status(500).send({ message: "Invalid Token" });
+  }
+};
+```
+Не забываем подключить миддлвар в index.js с помощью app.use
+
+В файле `routes/user` добавляем еще один роут по аналогии с остальными. Мы прокинули айди пользователя в объект `req`  и теперь можем обращаться к нему через `req.user.id`.
+
+Пример как найти пользователя по email у вас уже есть, по аналогии находим пользователя по id и возвращаем на клиент. 
+
+Теперь у нас есть ядро приложения. Эндпоинты для логина, регистрации и профиля пользователя. При желании можно добавить регистрацию через соц сети, это бонусное задание. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
